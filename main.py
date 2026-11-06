@@ -17,6 +17,7 @@ task2  loads the saved PipelineModel and scores the test listings, as a scoring 
 Fill in the parts marked TODO. Each task is a function; a task that still returns None is
 reported as not implemented, so the file always runs.
 """
+
 import sys
 
 from pyspark.sql import SparkSession
@@ -30,15 +31,26 @@ if len(sys.argv) != 4 or sys.argv[1] not in ("task1", "task2"):
     print(__doc__)
     sys.exit(2)
 task, shared, seed = sys.argv[1], sys.argv[2].rstrip("/"), int(sys.argv[3])
-data_dir, out_dir, model_dir = f"{shared}/data", f"{shared}/output/{task}", f"{shared}/models/full"
+data_dir, out_dir, model_dir = (
+    f"{shared}/data",
+    f"{shared}/output/{task}",
+    f"{shared}/models/full",
+)
 
-spark = (SparkSession.builder.appName(f"AirbnbML-{task}")
-         .config("spark.sql.shuffle.partitions", 4).getOrCreate())
+spark = (
+    SparkSession.builder.appName(f"AirbnbML-{task}")
+    .config("spark.sql.shuffle.partitions", 4)
+    .getOrCreate()
+)
 spark.sparkContext.setLogLevel("WARN")
 
 # The evaluators used throughout: RMSE and R2 on the price in dollars.
-rmse_eval = RegressionEvaluator(labelCol="price", predictionCol="prediction", metricName="rmse")
-r2_eval = RegressionEvaluator(labelCol="price", predictionCol="prediction", metricName="r2")
+rmse_eval = RegressionEvaluator(
+    labelCol="price", predictionCol="prediction", metricName="rmse"
+)
+r2_eval = RegressionEvaluator(
+    labelCol="price", predictionCol="prediction", metricName="r2"
+)
 
 
 def evaluate(name, predDF):
@@ -51,7 +63,9 @@ def evaluate(name, predDF):
 def save_metrics(rows, name="metrics"):
     """Write a list of (model, rmse, r2) as one CSV file with a header under out_dir."""
     df = spark.createDataFrame(rows, ["model", "rmse", "r2"])
-    df.coalesce(1).write.mode("overwrite").option("header", True).csv(f"{out_dir}/{name}")
+    df.coalesce(1).write.mode("overwrite").option("header", True).csv(
+        f"{out_dir}/{name}"
+    )
 
 
 def feature_columns(df):
@@ -63,7 +77,9 @@ def feature_columns(df):
 
 def load_split():
     """The training and test sets written by task 1."""
-    return spark.read.parquet(f"{data_dir}/split/train"), spark.read.parquet(f"{data_dir}/split/test")
+    return spark.read.parquet(f"{data_dir}/split/train"), spark.read.parquet(
+        f"{data_dir}/split/test"
+    )
 
 
 # ---------------------------------------------------------------- Task 1: baseline and full pipeline
@@ -80,7 +96,7 @@ def task1_pipelines():
     output/task1/metrics. Name the models "baseline" and "full".
     """
     airbnbDF = spark.read.parquet(f"{data_dir}/sf-airbnb-clean.parquet")
-    trainDF, testDF = airbnbDF.randomSplit([.8, .2], seed=seed)
+    trainDF, testDF = airbnbDF.randomSplit([0.8, 0.2], seed=seed)
     trainDF.write.mode("overwrite").parquet(f"{data_dir}/split/train")
     testDF.write.mode("overwrite").parquet(f"{data_dir}/split/test")
     trainDF, testDF = load_split()
@@ -96,7 +112,27 @@ def task1_pipelines():
     categorical, numeric = feature_columns(trainDF)
     # TODO: indexer, encoder, assembler, LinearRegression; fit the Pipeline on trainDF;
     #       results.append(evaluate("full", <predictions on testDF>)); save the model
-    return None
+    indexOutputColumns = [c + "Index" for c in categorical]
+    oheOutputColumns = [c + "OHE" for c in categorical]
+    stringIndexer = StringIndexer(
+        inputCols=categorical, outputCols=indexOutputColumns, handleInvalid="skip"
+    )
+    oheEncoder = OneHotEncoder(
+        inputCols=indexOutputColumns, outputCols=oheOutputColumns
+    )
+    assembler = VectorAssembler(
+        inputCols=oheOutputColumns + numeric, outputCol="features"
+    )
+    lrFull = LinearRegression(featuresCol="features", labelCol="price")
+    full = Pipeline(stages=[stringIndexer, oheEncoder, assembler, lrFull]).fit(trainDF)
+
+    predictionDF = full.transform(testDF)
+    predictionDF.select("bedrooms", "room_type", "price", "prediction").show(5)
+    results.append(evaluate("full", predictionDF))
+
+    full.write().overwrite().save(model_dir)
+    print(f"saved to {model_dir}")
+    return results
 
 
 # ---------------------------------------------------------------- Task 2: score with the saved model
@@ -108,13 +144,33 @@ def task2_score():
     RMSE of its predictions. Return the DataFrame you wrote.
     """
     # TODO
-    return None
+    _, testDF = load_split()
+    model = PipelineModel.load(model_dir)
+    print("stages:", [type(s).__name__ for s in model.stages])
+
+    predictionDF = model.transform(testDF)
+    print(f"RMSE of the loaded model: {rmse_eval.evaluate(predictionDF):.1f}")
+
+    out = predictionDF.select(
+        "neighbourhood_cleansed",
+        "room_type",
+        "bedrooms",
+        "price",
+        sround(col("prediction"), 1).alias("prediction"),
+    )
+    out.coalesce(1).write.mode("overwrite").option("header", True).csv(
+        f"{out_dir}/predictions"
+    )
+    out.show(5)
+    print(f"{out.count()} predictions for {testDF.count()} test rows")
+    return out
 
 
 # ---------------------------------------------------------------- main
 if task == "task1":
     result = task1_pipelines()
-    if result: save_metrics(result)
+    if result:
+        save_metrics(result)
 else:
     result = task2_score()
 if result is None:
